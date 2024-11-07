@@ -120,16 +120,16 @@ class Server(object):
 # 定义参数
 class Args:
     def __init__(self):
-        self.comm_round = 100  # 通信轮数
-        self.all_clients = 10  # 总客户端数
-        self.num_clients = 10  # 每轮选择的客户端数
-        self.local_epochs = 1  # 客户端本地训练轮数
-        self.lr = 0.001  # 学习率
-        self.batch_size = 64  # 批量大小
+        self.comm_round = 100  # communication round
+        self.all_clients = 10  # all num
+        self.num_clients = 10  # 
+        self.local_epochs = 1  # local traning
+        self.lr = 0.001  # learning rate
+        self.batch_size = 64  # batch size
         self.dataset = 'Cifar100' ####Fashion/Cifar10/Cifar100
         self.non_iid = 'Dirichlet' ##Dirichlet/Pathological
-        self.dirichlet_alpha = 0.5 #dirichlet系数/non-IID程度
-        self.num_shard = 50 #数据集分成的类别份数,num_shards = num_clients * (类别数 / 每客户端的类别数量)
+        self.dirichlet_alpha = 0.5 #dirichlet/non-IID
+        self.num_shard = 50 #num_shards = num_clients * (class / class per client)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.method = 'Our'  #Local/FedAvg/Ditto/Our/FedALA
 
