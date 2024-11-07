@@ -19,10 +19,12 @@ class Client(object):
         self.testloader = local_testloader
         self.args = args
         
-        if self.args.dataset == 'Fashion':
-            self.net = fashion_LeNet().to(self.args.device)
-        else:
-            self.net = cifar10_ResNet18().to(self.args.device)
+        model_mapping = {
+            'Fashion': fashion_LeNet,
+            'Cifar10': cifar10_ResNet18,
+            'Cifar100': lambda: models.resnet18(pretrained=False, num_classes=100)
+        }
+        self.net = model_mapping.get(self.args.dataset, lambda: None)().to(self.args.device)
         self.previous_local_model = None
         self.optimizer = optim.SGD(self.net.parameters(), lr=args.lr, momentum=0.9)
         self.criterion = nn.CrossEntropyLoss()
@@ -44,8 +46,8 @@ class Client(object):
             for inputs, labels in self.trainloader:
                 inputs, labels = inputs.to(self.args.device), labels.to(self.args.device)
                 self.optimizer.zero_grad()
-                global_outputs = self.net(inputs)
-                loss = self.criterion(global_outputs, labels)
+                outputs,_ = self.net(inputs)
+                loss = self.criterion(outputs, labels)
                 loss.backward()
                 self.optimizer.step()
         self.previous_local_model = copy.deepcopy(self.net.state_dict())
@@ -57,7 +59,7 @@ class Client(object):
         with torch.no_grad():
             for inputs, labels in self.testloader:
                 inputs, labels = inputs.to(self.args.device), labels.to(self.args.device)
-                outputs = net(inputs)
+                outputs,_ = net(inputs)
                 predicted = torch.argmax(outputs, dim=1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
@@ -69,8 +71,12 @@ class Server(object):
         self.args = args
         if self.args.dataset == 'Fashion':
             self.global_model = fashion_LeNet().to(self.args.device)
-        else:
+        elif self.args.dataset == 'Cifar10':
             self.global_model = cifar10_ResNet18().to(self.args.device)
+        elif self.args.dataset == 'Cifar100':
+            self.global_model = models.resnet18(pretrained=False, num_classes=100).to(self.args.device)
+        else:
+            print("coming soon")
         self.clients_acc = [[] for _ in range(args.num_clients)]
 
     def avg_weights(self,w):
@@ -82,7 +88,7 @@ class Server(object):
         return w_avg
 
     def save_results(self):
-        summary_file = './csv/{}/{}/results.csv'.format(args.dataset, args.method)
+        summary_file = f'./csv/{self.args.dataset}/rho/{self.args.method}.csv'
         with open(summary_file, 'w', encoding='utf-8', newline='') as f:
             csv_writer = csv.writer(f)
             for client_id in range(len(self.clients)):
@@ -94,27 +100,25 @@ class Server(object):
         for comm_round in range(self.args.comm_round):
             print(f'\n--- Communication Round {comm_round+1}/{self.args.comm_round} ---')
             
-
-            local_weights = [client.train() for client_id, client in enumerate(self.clients)]
+            local_weights = [client.train() for client_id, client in enumerate(self.clients)]  ####w_i^t
             pre_acc = [client.test(client.net) for client in self.clients]
+            for client_id, acc in enumerate(pre_acc):
+                self.clients_acc[client_id].append(acc)
+            print(f'Average Personalized Model Test Accuracy: {np.mean(pre_acc)}%')
             
-            global_weights = self.avg_weights(local_weights)
+            global_weights = self.avg_weights(local_weights)    ##########w^t
             self.global_model.load_state_dict(global_weights)
             
             ser_acc = [client.test(self.global_model) for client in self.clients]
             SSM_loss = np.array(pre_acc) - np.array(ser_acc)
             
             for client_id, client in enumerate(self.clients):
-                ssm_loss = -SSM_loss[client_id]/100
+                ssm_loss = -SSM_loss[client_id]
                 loss_alpha = np.exp(ssm_loss) / (1 + np.exp(ssm_loss))
-                #print(loss_alpha)
-                client.load_global_model(self.global_model.state_dict(), loss_alpha)
-
-            accuracies = [client.test(client.net) for client in self.clients]
-            for client_id, acc in enumerate(accuracies):
-                self.clients_acc[client_id].append(acc)
-            print(f'Average Personalized Model Test Accuracy: {np.mean(accuracies)}%')
+                client.load_global_model(self.global_model.state_dict(), loss_alpha)   #########\hat{w}^t
             
+        #ssm_losses_df = pd.DataFrame(ssm_losses, columns=[f'Client_{i+1}' for i in range(len(self.clients))])
+        #ssm_losses_df.to_csv(f'./csv/motivation/ssm_losses0.55-mambafl.csv', index=False)
         self.save_results()
 
 # 定义参数
