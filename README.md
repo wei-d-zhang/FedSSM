@@ -4,18 +4,17 @@ Personalized Federated Learning (PFL) enables collaborative learning across dist
 
 # Setup
 torchvision >= v0.13  
-
 numpy  
 pandas  
 np.random.seed(500)  
-datasets = {Fashion-MNIST,CIFAR-10,CIFAR-100} \\
-model = torchvision.models.resnet18(pretrained=False) \\
+datasets = {Fashion-MNIST,CIFAR-10,CIFAR-100}  
+model = torchvision.models.resnet18(pretrained=False)  
 
 # Experiments
-FedSSM: python our.py \\
-Ditto (ICML 2020)： python Ditto.py \\
-FedACG (CVPR 2024)：python FedACG.py \\
-FedALA (AAAI 2023): python FedALA.py \\
-MOON (CVPR 2021): python MOON.py \\
-FedDecorr (ICLR 2023): python FedDecorr.py \\
-FedCross (ICDE 2024): python FedCross.py \\
+FedSSM: python our.py  
+Ditto (ICML 2020)： python Ditto.py  
+FedACG (CVPR 2024)：python FedACG.py  
+FedALA (AAAI 2023): python FedALA.py  
+MOON (CVPR 2021): python MOON.py  
+FedDecorr (ICLR 2023): python FedDecorr.py  
+FedCross (ICDE 2024): python FedCross.py  
