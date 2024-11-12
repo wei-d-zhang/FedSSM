@@ -5,11 +5,12 @@ import torch.optim as optim
 import numpy as np
 import copy
 import csv
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms,models
 from torch.utils.data import Subset
-from model import fashion_LeNet,cifar10_ResNet18
-from non_IID import create_client_dataloaders
+from model import *
+from data_loader import *
 import torch.nn.functional as F
+import time
 
 torch.manual_seed(543)
 
@@ -18,12 +19,12 @@ class Client(object):
         self.trainloader = local_trainloader
         self.testloader = local_testloader
         self.args = args
-        
-        # 初始化模型和优化器
-        if self.args.dataset == 'Fashion':
-            self.net = fashion_LeNet().to(self.args.device)
-        else:
-            self.net = cifar10_ResNet18().to(self.args.device)
+        model_mapping = {
+            'Fashion': Fashion_ResNet18,
+            'Cifar10': cifar10_ResNet18,
+            'Cifar100': cifar100_ResNet18
+        }
+        self.net = model_mapping.get(self.args.dataset, lambda: None)().to(self.args.device)
         self.optimizer = optim.SGD(self.net.parameters(), lr=args.lr, momentum=0.9)
         self.criterion = nn.CrossEntropyLoss()
 
@@ -34,7 +35,7 @@ class Client(object):
                 inputs, labels = inputs.to(self.args.device), labels.to(self.args.device)
                 
                 self.optimizer.zero_grad()
-                outputs = net(inputs)
+                outputs,_ = net(inputs)
                 loss = self.criterion(outputs, labels)
                 loss.backward()
                 self.optimizer.step()
@@ -48,7 +49,7 @@ class Client(object):
         with torch.no_grad():
             for inputs, labels in self.testloader:
                 inputs, labels = inputs.to(self.args.device), labels.to(self.args.device)
-                outputs = net(inputs)
+                outputs,_ = net(inputs)
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
@@ -62,13 +63,16 @@ class FedAvg(object):
         self.clients = clients
         self.args = args
         if self.args.dataset == 'Fashion':
-            self.global_model = fashion_LeNet().to(self.args.device)
-        else:
+            self.global_model = Fashion_ResNet18().to(self.args.device)
+        elif self.args.dataset == 'Cifar10':
             self.global_model = cifar10_ResNet18().to(self.args.device)
+        elif self.args.dataset == 'Cifar100':
+            self.global_model = cifar100_ResNet18().to(self.args.device)
+        else:
+            print("coming soon")
         self.clients_acc = [[] for i in range(args.num_clients)]
         
     def avg_weights(self,w):
-        # 计算模型参数的加权平均
         w_avg = copy.deepcopy(w[0])
         for key in w_avg.keys():
             for i in range(1, len(w)):
@@ -77,43 +81,28 @@ class FedAvg(object):
         return w_avg
     
     def save_results(self):
-        # 定义汇总文件路径
-        summary_file = './csv/{}/{}/results.csv'.format(args.dataset, args.method)
-
-        # 打开文件进行写操作
+        summary_file = f'./csv/{self.args.dataset}/iid/{self.args.method}.csv'
         with open(summary_file, 'w', encoding='utf-8', newline='') as f:
             csv_writer = csv.writer(f)
-
-            # 写入表头
-            csv_writer.writerow(['Client_ID', 'Max_Accuracy', 'All_Accuracies'])
-
-            # 遍历所有客户端
             for client_id in range(len(self.clients)):
-                max_acc = max(self.clients_acc[client_id])  # 找到该客户端的最大精度
-                all_accs = self.clients_acc[client_id]      # 获取该客户端所有精度
-
-                # 写入每个客户端的结果（客户端ID，最大精度，所有精度值）
-                csv_writer.writerow([client_id + 1, max_acc, all_accs])
+                all_accs = self.clients_acc[client_id]
+                csv_writer.writerow(all_accs)
 
     def train(self):
         for comm_round in range(self.args.comm_round):
             print(f'\n--- Communication Round {comm_round+1}/{self.args.comm_round} ---')
-            
-            # 将全局模型分发给客户端
+
             for client in self.clients:
                 client.net.load_state_dict(self.global_model.state_dict())
 
-            # 客户端本地训练
             local_weights = []
             for client in self.clients:
                 local_w = client.train(client.net)
                 local_weights.append(local_w)
 
-            # 服务器聚合模型
             global_weights = self.avg_weights(local_weights)
             self.global_model.load_state_dict(global_weights)
 
-            # 测试全局模型在每个客户端上的性能
             accuracies = []
             for client_id, client in enumerate(self.clients):
                 acc = self.clients[client_id].test(self.global_model)
@@ -124,26 +113,34 @@ class FedAvg(object):
         self.save_results()
 
 
-# 定义参数
-# 定义参数
+
 class Args:
     def __init__(self):
-        self.comm_round = 100  # 通信轮数
-        self.all_clients = 10  # 总客户端数
-        self.num_clients = 10  # 每轮选择的客户端数
-        self.local_epochs = 1  # 客户端本地训练轮数
-        self.lr = 0.001  # 学习率
+        self.comm_round = 100  # Communication rounds
+        self.all_clients = 10  # Total number of clients
+        self.num_clients = 10  # The number of clients selected per round
+        self.local_epochs = 1  # Number of client local training rounds
+        self.lr = 0.001  # Learning rate
+        self.batch_size = 64  # Batch size
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.dirichlet_alpha = 0.5 #dirichlet系数/non-IID程度
-        self.dataset = 'Fashion' ####Fashion/Cifar
-        self.batch_size = 64  # 批量大小
-        self.method = 'FedAvg'  #FedAvg/FedProx/MambaFL/FedALA
+        self.dataset = 'Cifar10' ####Fashion/Cifar10/Cifar100
+        self.non_iid = 'Dirichlet' ##Dirichlet/Pathological/iid
+        self.dirichlet_alpha = 0.1 #dirichlet coefficient /non-IID degree
+        self.num_shard = 50 #The number of categories into which the data set is divided
+        self.method = 'FedAvg_iid'  #FedAvg/Ditto/Our/FedALA/Local
 
-# 示例使用
 args = Args()
-
-train_loader,test_loader = create_client_dataloaders(args.dataset, num_clients=args.all_clients, alpha=args.dirichlet_alpha, batch_size=args.batch_size, test_ratio=0.2)
+begin_time = time.time()
+if args.non_iid == 'Dirichlet':
+    train_loader,test_loader = create_client_dataloaders(args.dataset, num_clients=args.all_clients, alpha=args.dirichlet_alpha, batch_size=args.batch_size, test_ratio=0.2)
+elif args.non_iid == 'Pathological':
+    train_loader,test_loader = create_client_dataloaders_pathological(args.dataset, num_clients=args.all_clients, num_shards=args.num_shard, batch_size=args.batch_size, test_ratio=0.2)
+else:
+    train_loader,test_loader =  create_iid_client_dataloaders(args.dataset, num_clients=args.all_clients, batch_size=args.batch_size, test_ratio=0.2)
 
 clients = [Client(train_loader[i], test_loader[i], args) for i in range(args.all_clients)]
 fedavg = FedAvg(clients, args)
 fedavg.train()
+end_time = time.time()
+run_time = end_time - begin_time
+print(f"Running time: {run_time} seconds")

@@ -75,7 +75,7 @@ class ALA:
                 y = y.to(self.device)
 
                 optimizer.zero_grad()
-                output = temp_model(x)
+                output,_ = temp_model(x)
                 loss_value = self.loss(output, y)  # Calculate loss
                 loss_value.backward()
 

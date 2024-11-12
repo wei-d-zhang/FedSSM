@@ -1,36 +1,83 @@
 import torch
 import random
-import copy
-import numpy as np
 import time
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import copy
+import csv
+from torchvision import datasets, transforms,models
+from torch.utils.data import Subset
+from model import *
+from data_loader import *
+import torch.nn.functional as F
+import time 
 
-from algorithm.FedCross.FedCrossClient import FedCross_client_model
-from models.model import fashion_LeNet, FMNIIST_ResNet18, cifar10_LeNet, cifar10_ResNet18, Scrap_ResNet18
+from model import *
 
-
-class Fed_Cross():
-    def __init__(self, args, client_dataloaders):
+class Client(object):
+    def __init__(self, local_trainloader, local_testloader, args):
+        self.trainloader = local_trainloader
+        self.testloader = local_testloader
         self.args = args
-        self.client_dataloaders = client_dataloaders
-        self.model = eval(args.model)().to(args.device)
-        self.client_models = [FedCross_client_model(args=self.args, dataloader=self.client_dataloaders[i], id=i) for i in range(self.args.client_num)]
+        model_mapping = {
+            'Fashion': Fashion_ResNet18,
+            'Cifar10': cifar10_ResNet18,
+            'Cifar100': cifar100_ResNet18
+        }
+        self.net = model_mapping.get(self.args.dataset, lambda: None)().to(self.args.device)
+        self.optimizer = optim.SGD(self.net.parameters(), lr=args.lr, momentum=0.9)
+        self.criterion = nn.CrossEntropyLoss()
+
+    def train(self, param):
+        self.net.load_state_dict(param)
+        self.net.train()
+        for epoch in range(self.args.local_epochs):
+            for inputs, labels in self.trainloader:
+                inputs, labels = inputs.to(self.args.device), labels.to(self.args.device)
+                
+                self.optimizer.zero_grad()
+                outputs,_ = self.net(inputs)
+                loss = self.criterion(outputs, labels)
+                loss.backward()
+                self.optimizer.step()
+                
+        return self.net.state_dict()
+
+    def test(self):
+        self.net.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for inputs, labels in self.testloader:
+                inputs, labels = inputs.to(self.args.device), labels.to(self.args.device)
+                outputs,_ = self.net(inputs)
+                _, predicted = torch.max(outputs.data, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+        
+        accuracy = 100 * correct / total
+        return accuracy
+
+
+class Server():
+    def __init__(self,clients, args):
+        self.clients = clients
+        self.args = args
+        model_mapping = {
+            'Fashion': Fashion_ResNet18,
+            'Cifar10': cifar10_ResNet18,
+            'Cifar100': cifar100_ResNet18
+        }
+        self.model = model_mapping.get(self.args.dataset, lambda: None)().to(self.args.device)
         self.Middleware_model = [copy.deepcopy(self.model.state_dict()) for _ in range(int(self.args.client_num * self.args.active_client_rate))]
 
-        self.acc = []
-        self.loss = []
-        self.acc_clients = [[] for _ in range(self.args.client_num)]
-        self.loss_clients = [[] for i in range(self.args.client_num)]
-
-        self.old_client_models = [copy.deepcopy(self.client_models[i].model) for i in range(self.args.client_num)]
-        self.now_client_models = [copy.deepcopy(self.client_models[i].model) for i in range(self.args.client_num)]
-        self.count_layer_conflicts_list = []
-
+        
+        self.clients_acc = [[] for i in range(args.client_num)]
         self.alpha = 0.5
         self.Is_Dynamic_alpha = False
 
     def run(self):
-
-        # random_client_ids = np.arange(self.args.client_num)
         for communication_round in range(self.args.global_rounds):
 
             # select client
@@ -38,15 +85,9 @@ class Fed_Cross():
                 selected_client_ids = self.select_clients()
             else:
                 selected_client_ids = np.arange(self.args.client_num)
-
-            # Shuffle Middleware_model
-            # if communication_round == 0:
+            
             random_client_ids = copy.deepcopy(selected_client_ids)
             random.shuffle(random_client_ids)
-
-            start_time = time.time()
-            test_loss_sum = []
-            test_acc_sum = []
 
             # Dynamic α-based acceleration
             if self.Is_Dynamic_alpha and self.alpha < 0.99:
@@ -56,62 +97,32 @@ class Fed_Cross():
 
             # local train
             for client_index in selected_client_ids:
-                # 保存上一轮模型参数
-                # self.old_client_models[client_index].load_state_dict(
-                    # self.client_models[client_index].model.state_dict())
-
-                # now_param = self.client_models[client_index].train()
-                now_param = self.client_models[client_index].train(self.Middleware_model[random_client_ids[client_index]])
-                # 保存本地训练后模型参数
-                # self.now_client_models[client_index].load_state_dict(now_param)
-                # upload
+                now_param = self.clients[client_index].train(self.Middleware_model[random_client_ids[client_index]])
                 self.Middleware_model[random_client_ids[client_index]] = now_param
 
             # update Middleware model
             self.CrossAggr()
 
-            # random_client_ids = copy.deepcopy(selected_client_ids)
-            # random.shuffle(random_client_ids)
-
-            # update client model
-            # for client_index in selected_client_ids:
-            #     self.client_models[client_index].model.load_state_dict(self.Middleware_model[random_client_ids[client_index]])
-
-            # update global model
+           
             global_param = self.update_model(self.Middleware_model)
             self.model.load_state_dict(global_param)
 
-            # 计算模型更新方向与伪梯度方向不一致的数量
-            # count_layer_conflicts = self.count_update_conflict()
-            # self.count_layer_conflicts_list.append(count_layer_conflicts)
-            # print(count_layer_conflicts)
-
-            # test
-            for client_index in selected_client_ids:
-                loss_i, acc_i = self.client_models[client_index].test(self.model.state_dict())
-                test_acc_sum.append(acc_i)
-                test_loss_sum.append(loss_i)
-                self.acc_clients[client_index].append(acc_i)
-                self.loss_clients[client_index].append(loss_i)
-
-            now_acc = sum(test_acc_sum)/len(test_acc_sum)
-            now_loss = sum(test_loss_sum)/len(test_loss_sum)
-
-            self.acc.append(round(now_acc, 2))
-            self.loss.append(round(now_loss, 2))
-
-            print("The loss of the {} round is :{} and the acc is:{},time cost: {}".format(communication_round, now_loss,
-                                                                                         now_acc,
-                                                                                         time.time() - start_time))
+            accuracies = []
+            for client_id, client in enumerate(self.clients):
+                acc = self.clients[client_id].test()
+                self.clients_acc[client_id].append(acc)
+                accuracies.append(acc)
+            print(f'round{communication_round} Test Accuracy: {np.mean(accuracies)}%')
         print("Over")
-
-        # avg_count_layer_conflicts = [0 for _ in range(int(self.args.model_layer_num / 2))]
-        # for layer in range(int(self.args.model_layer_num / 2)):
-        #     for i in range(len(self.count_layer_conflicts_list)):
-        #         avg_count_layer_conflicts[layer] += self.count_layer_conflicts_list[i][layer]
-        # print(avg_count_layer_conflicts)
-
-        return self.loss_clients, self.acc, self.acc_clients
+        self.save_results()
+        
+    def save_results(self):
+        summary_file = f'./csv/{self.args.dataset}/iid/{self.args.method}.csv'
+        with open(summary_file, 'w', encoding='utf-8', newline='') as f:
+            csv_writer = csv.writer(f)
+            for client_id in range(len(self.clients)):
+                all_accs = self.clients_acc[client_id]
+                csv_writer.writerow(all_accs)
 
     def Dynamic_alpha(self):
         # Dynamic α-based acceleration
@@ -155,14 +166,7 @@ class Fed_Cross():
         min_sim_id = sim_list.index(max(sim_list))
         return min_sim_id
 
-    def CoModelSel_Order(self):
-        pass
-
     def calculateDistance_cosine(self, state_dict1, state_dict2):
-        """
-        Calculate the distance between model parameters
-        """
-        # 计算余弦相似度
         vector1 = self.state_to_vector(state_dict1)
         vecror2 = self.state_to_vector(state_dict2)
 
@@ -170,43 +174,38 @@ class Fed_Cross():
         return cos_sim
 
     def state_to_vector(self, state_dict):
-        # 将state_dict转为一维向量
         vector = torch.cat([par.flatten()for par in state_dict.values()])
         return vector
 
-    def count_update_conflict(self):
-        count_layer_conflicts = [0 for _ in range(int(self.args.model_layer_num / 2))]
-        for index in range(self.args.client_num):
-            temp = self.calculate_update_conflict(index)
-            for i in range(len(temp)):
-                count_layer_conflicts[i] += temp[i]
+class Args:
+    def __init__(self):
+        self.comm_round = 100  # Communication rounds
+        self.all_clients = 10  # Total number of clients
+        self.num_clients = 10  # The number of clients selected per round
+        self.local_epochs = 1  # Number of client local training rounds
+        self.lr = 0.001  # Learning rate
+        self.batch_size = 64  # Batch size
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.dataset = 'Cifar10' ####Fashion/Cifar10/Cifar100
+        self.non_iid = 'Dirichlet' ##Dirichlet/Pathological/iid
+        self.dirichlet_alpha = 0.1 #dirichlet coefficient /non-IID degree
+        self.num_shard = 50 #The number of categories into which the data set is divided
+        self.active_client_rate = 1
+        self.method = 'FedCross_iid'  #FedAvg/Ditto/Our/FedALA/Local
 
-        return count_layer_conflicts
+args = Args()
+begin_time = time.time()
+if args.non_iid == 'Dirichlet':
+    train_loader,test_loader = create_client_dataloaders(args.dataset, num_clients=args.all_clients, alpha=args.dirichlet_alpha, batch_size=args.batch_size, test_ratio=0.2)
+elif args.non_iid == 'Pathological':
+    train_loader,test_loader = create_client_dataloaders_pathological(args.dataset, num_clients=args.all_clients, num_shards=args.num_shard, batch_size=args.batch_size, test_ratio=0.2)
+else:
+    train_loader,test_loader =  create_iid_client_dataloaders(args.dataset, num_clients=args.all_clients, batch_size=args.batch_size, test_ratio=0.2)
 
-    def calculate_update_conflict(self, index):
-        # 只能用于lenet,mlp
-        pseudo_gradient = []
-        model_update_direction = []
-        model_state = copy.deepcopy(self.model.state_dict())
-        count_layer_conflict = []
-        for key in model_state.keys():
-            pseudo_gradient.append(self.now_client_models[index].state_dict()[key].cpu().flatten().detach().numpy() -
-                                   self.old_client_models[index].state_dict()[key].cpu().flatten().detach().numpy())
-            model_update_direction.append(
-                self.client_models[index].model.state_dict()[key].cpu().flatten().detach().numpy() -
-                self.now_client_models[index].state_dict()[key].cpu().flatten().detach().numpy())
+clients = [Client(train_loader[i], test_loader[i], args) for i in range(args.all_clients)]
+server = Server(clients, args)
+server.run()
 
-        for i in range(0, self.args.model_layer_num, 2):
-            temp_1 = np.concatenate((pseudo_gradient[i], pseudo_gradient[i + 1]))  # weight + bias
-            temp_2 = np.concatenate((model_update_direction[i], model_update_direction[i + 1]))
-
-            dot_product = np.dot(temp_1, temp_2)  # 计算向量点积
-            norm_vec1 = np.linalg.norm(temp_1)  # 计算vec1的范数
-            norm_vec2 = np.linalg.norm(temp_2)  # 计算vec2的范数
-            if np.isnan(dot_product / (norm_vec1 * norm_vec2)):
-                count_layer_conflict.append(0)
-            else:
-                count_layer_conflict.append(dot_product / (norm_vec1 * norm_vec2))
-            # count_layer_conflict.append(torch.cosine_similarity(torch.from_numpy(temp_1), torch.from_numpy(temp_2))) # 计算余弦相似度
-
-        return count_layer_conflict
+end_time = time.time()
+run_time = end_time - begin_time
+print(f"Running time: {run_time} seconds")

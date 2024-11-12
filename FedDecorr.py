@@ -8,8 +8,9 @@ import csv
 from torchvision import datasets, transforms,models
 from torch.utils.data import Subset
 from model import *
-from non_IID import create_client_dataloaders,create_client_dataloaders_pathological
+from data_loader import *
 import torch.nn.functional as F
+import time
 
 torch.manual_seed(543)
 
@@ -45,12 +46,10 @@ class Client(object):
         self.trainloader = local_trainloader
         self.testloader = local_testloader
         self.args = args
-        
-        # 初始化模型和优化器
         model_mapping = {
-            'Fashion': fashion_LeNet,
+            'Fashion': Fashion_ResNet18,
             'Cifar10': cifar10_ResNet18,
-            'Cifar100': cifar100_ResNet18
+            'Cifar100':  cifar100_ResNet18
         }
         self.net = model_mapping.get(self.args.dataset, lambda: None)().to(self.args.device)
         self.optimizer = optim.SGD(self.net.parameters(), lr=args.lr, momentum=0.9)
@@ -95,7 +94,7 @@ class Server(object):
         self.clients = clients
         self.args = args
         if self.args.dataset == 'Fashion':
-            self.global_model = fashion_LeNet().to(self.args.device)
+            self.global_model = Fashion_ResNet18().to(self.args.device)
         elif self.args.dataset == 'Cifar10':
             self.global_model = cifar10_ResNet18().to(self.args.device)
         elif self.args.dataset == 'Cifar100':
@@ -105,7 +104,6 @@ class Server(object):
         self.clients_acc = [[] for i in range(args.num_clients)]
         
     def avg_weights(self,w):
-        # 计算模型参数的加权平均
         w_avg = copy.deepcopy(w[0])
         for key in w_avg.keys():
             for i in range(1, len(w)):
@@ -114,36 +112,25 @@ class Server(object):
         return w_avg
     
     def save_results(self):
-        # 定义汇总文件路径
-        summary_file = f'./csv/{self.args.dataset}/{self.args.method}{self.args.non_iid}.csv'
-        # 打开文件进行写操作
+        summary_file = f'./csv/{self.args.dataset}/iid/{self.args.method}.csv'
         with open(summary_file, 'w', encoding='utf-8', newline='') as f:
             csv_writer = csv.writer(f)
-            # 遍历所有客户端
             for client_id in range(len(self.clients)):
-                all_accs = self.clients_acc[client_id]      # 获取该客户端所有精度
-                # 写入每个客户端的结果（客户端ID，最大精度，所有精度值）
+                all_accs = self.clients_acc[client_id]
                 csv_writer.writerow(all_accs)
 
     def train(self):
         for comm_round in range(self.args.comm_round):
             print(f'\n--- Communication Round {comm_round+1}/{self.args.comm_round} ---')
             
-            # 将全局模型分发给客户端
             for client in self.clients:
                 client.net.load_state_dict(self.global_model.state_dict())
-
-            # 客户端本地训练
             local_weights = []
             for client in self.clients:
                 local_w = client.train(client.net)
                 local_weights.append(local_w)
-
-            # 服务器聚合模型
             global_weights = self.avg_weights(local_weights)
             self.global_model.load_state_dict(global_weights)
-
-            # 测试全局模型在每个客户端上的性能
             accuracies = []
             for client_id, client in enumerate(self.clients):
                 acc = self.clients[client_id].test(client.net)
@@ -153,30 +140,34 @@ class Server(object):
             
         self.save_results()
 
-
-# 定义参数
 class Args:
     def __init__(self):
-        self.comm_round = 100  # 通信轮数
-        self.all_clients = 10  # 总客户端数
-        self.num_clients = 10  # 每轮选择的客户端数
-        self.local_epochs = 1  # 客户端本地训练轮数
-        self.lr = 0.001  # 学习率
-        self.batch_size = 64  # 批量大小
+        self.comm_round = 100  # Communication rounds
+        self.all_clients = 10  # Total number of clients
+        self.num_clients = 10  # The number of clients selected per round
+        self.local_epochs = 1  # Number of client local training rounds
+        self.lr = 0.001  # Learning rate
+        self.batch_size = 64  # Batch size
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.dataset = 'Fashion' ####Fashion/Cifar10/Cifar100
-        self.non_iid = 'Pathological' ##Dirichlet/Pathological
-        self.dirichlet_alpha = 0.1 #dirichlet系数/non-IID程度
-        self.num_shard = 50 #数据集分成的类别份数,num_shards = num_clients * (类别数 / 每客户端的类别数量)
-        self.method = 'FedDecorr'  #FedAvg/Ditto/Our/FedALA/Local
+        self.dataset = 'Cifar10' ####Fashion/Cifar10/Cifar100
+        self.non_iid = 'Dirichlet' ##Dirichlet/Pathological/iid
+        self.dirichlet_alpha = 0.1 #dirichlet coefficient /non-IID degree
+        self.num_shard = 50 #The number of categories into which the data set is divided
+        self.method = 'FedDecorr_iid'  #FedAvg/Ditto/Our/FedALA/Local
 
-# 示例使用
 args = Args()
+begin_time = time.time()
 if args.non_iid == 'Dirichlet':
     train_loader,test_loader = create_client_dataloaders(args.dataset, num_clients=args.all_clients, alpha=args.dirichlet_alpha, batch_size=args.batch_size, test_ratio=0.2)
-else:
+elif args.non_iid == 'Pathological':
     train_loader,test_loader = create_client_dataloaders_pathological(args.dataset, num_clients=args.all_clients, num_shards=args.num_shard, batch_size=args.batch_size, test_ratio=0.2)
+else:
+    train_loader,test_loader =  create_iid_client_dataloaders(args.dataset, num_clients=args.all_clients, batch_size=args.batch_size, test_ratio=0.2)
 
 clients = [Client(train_loader[i], test_loader[i], args) for i in range(args.all_clients)]
 server = Server(clients, args)
 server.train()
+
+end_time = time.time()
+run_time = end_time - begin_time
+print(f"Running time: {run_time} seconds")
