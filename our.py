@@ -6,10 +6,11 @@ import numpy as np
 import copy
 import pandas as pd
 import csv
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms, models
 from torch.utils.data import Subset
 from model import *
-from non_IID import create_client_dataloaders
+from data_loader import *
+import time
 
 torch.manual_seed(543)
 
@@ -20,7 +21,7 @@ class Client(object):
         self.args = args
         
         model_mapping = {
-            'Fashion': fashion_LeNet,
+            'Fashion': Fashion_ResNet18,
             'Cifar10': cifar10_ResNet18,
             'Cifar100': lambda: models.resnet18(pretrained=False, num_classes=100)
         }
@@ -70,7 +71,7 @@ class Server(object):
         self.clients = clients
         self.args = args
         if self.args.dataset == 'Fashion':
-            self.global_model = fashion_LeNet().to(self.args.device)
+            self.global_model = Fashion_ResNet18().to(self.args.device)
         elif self.args.dataset == 'Cifar10':
             self.global_model = cifar10_ResNet18().to(self.args.device)
         elif self.args.dataset == 'Cifar100':
@@ -88,7 +89,7 @@ class Server(object):
         return w_avg
 
     def save_results(self):
-        summary_file = f'./csv/{self.args.dataset}/rho/{self.args.method}.csv'
+        summary_file = f'./csv/{self.args.dataset}/iid/{self.args.method}.csv'
         with open(summary_file, 'w', encoding='utf-8', newline='') as f:
             csv_writer = csv.writer(f)
             for client_id in range(len(self.clients)):
@@ -96,7 +97,6 @@ class Server(object):
                 csv_writer.writerow(all_accs)
 
     def train(self):
-        #ssm_losses = []
         for comm_round in range(self.args.comm_round):
             print(f'\n--- Communication Round {comm_round+1}/{self.args.comm_round} ---')
             
@@ -113,37 +113,42 @@ class Server(object):
             SSM_loss = np.array(pre_acc) - np.array(ser_acc)
             
             for client_id, client in enumerate(self.clients):
-                ssm_loss = -SSM_loss[client_id]
+                ssm_loss = -0.01*SSM_loss[client_id]
                 loss_alpha = np.exp(ssm_loss) / (1 + np.exp(ssm_loss))
                 client.load_global_model(self.global_model.state_dict(), loss_alpha)   #########\hat{w}^t
             
-        #ssm_losses_df = pd.DataFrame(ssm_losses, columns=[f'Client_{i+1}' for i in range(len(self.clients))])
-        #ssm_losses_df.to_csv(f'./csv/motivation/ssm_losses0.55-mambafl.csv', index=False)
         self.save_results()
 
-# 定义参数
 class Args:
     def __init__(self):
-        self.comm_round = 100  # communication round
-        self.all_clients = 10  # all num
-        self.num_clients = 10  # 
-        self.local_epochs = 1  # local traning
-        self.lr = 0.001  # learning rate
-        self.batch_size = 64  # batch size
-        self.dataset = 'Cifar100' ####Fashion/Cifar10/Cifar100
-        self.non_iid = 'Dirichlet' ##Dirichlet/Pathological
-        self.dirichlet_alpha = 0.5 #dirichlet/non-IID
-        self.num_shard = 50 #num_shards = num_clients * (class / class per client)
+        self.comm_round = 100  # Communication rounds
+        self.all_clients = 10  # Total number of clients
+        self.num_clients = 10  # The number of clients selected per round
+        self.local_epochs = 1  # Number of client local training rounds
+        self.lr = 0.001  # Learning rate
+        self.batch_size = 64  # Batch size
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.method = 'Our'  #Local/FedAvg/Ditto/Our/FedALA
+        self.dataset = 'Cifar10' ####Fashion/Cifar10/Cifar100
+        self.non_iid = 'Dirichlet' ##Dirichlet/Pathological/iid
+        self.dirichlet_alpha = 0.1 #dirichlet coefficient /non-IID degree
+        self.num_shard = 50 #The number of categories into which the data set is divided
+        self.method = 'Our_iid'  #Local/FedAvg/Ditto/Our/FedALA
 
-# 示例使用
 args = Args()
 
+begin_time = time.time()
 if args.non_iid == 'Dirichlet':
     train_loader,test_loader = create_client_dataloaders(args.dataset, num_clients=args.all_clients, alpha=args.dirichlet_alpha, batch_size=args.batch_size, test_ratio=0.2)
-else:
+elif args.non_iid == 'Pathological':
     train_loader,test_loader = create_client_dataloaders_pathological(args.dataset, num_clients=args.all_clients, num_shards=args.num_shard, batch_size=args.batch_size, test_ratio=0.2)
+else:
+    train_loader,test_loader =  create_iid_client_dataloaders(args.dataset, num_clients=args.all_clients, batch_size=args.batch_size, test_ratio=0.2)
+
 clients = [Client(train_loader[i], test_loader[i], args) for i in range(args.all_clients)]
 server = Server(clients, args)
 server.train()
+
+end_time = time.time()
+run_time = end_time - begin_time
+print(f"Running time: {run_time} seconds")
+
