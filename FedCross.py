@@ -78,7 +78,7 @@ class Server():
         self.Is_Dynamic_alpha = False
 
     def run(self):
-        for communication_round in range(self.args.global_rounds):
+        for communication_round in range(self.args.comm_round):
 
             # select client
             if self.args.active_client_rate < 1:
@@ -181,7 +181,7 @@ class Args:
     def __init__(self):
         self.comm_round = 100  # Communication rounds
         self.all_clients = 10  # Total number of clients
-        self.num_clients = 10  # The number of clients selected per round
+        self.client_num = 10  # The number of clients selected per round
         self.local_epochs = 1  # Number of client local training rounds
         self.lr = 0.001  # Learning rate
         self.batch_size = 64  # Batch size
