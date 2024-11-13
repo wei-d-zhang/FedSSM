@@ -22,7 +22,7 @@ class Client(object):
         
         if self.args.dataset == 'Fashion':
             self.net = Fashion_ResNet18().to(self.args.device)
-            self.global_net = fashion_LeNet().to(self.args.device)
+            self.global_net = Fashion_ResNet18().to(self.args.device)
         elif self.args.dataset == 'Cifar10':
             self.net = cifar10_ResNet18().to(self.args.device)  
             self.global_net = cifar10_ResNet18().to(self.args.device)
@@ -78,7 +78,7 @@ class Server(object):
         elif self.args.dataset == 'Cifar10':
             self.global_model = cifar10_ResNet18().to(self.args.device)
         elif self.args.dataset == 'Cifar100':
-            self.global_model = cifar10_ResNet18().to(self.args.device)
+            self.global_model = cifar100_ResNet18().to(self.args.device)
         else:
             print("coming soon")
         self.clients_acc = [[] for i in range(args.num_clients)]
